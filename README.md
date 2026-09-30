@@ -126,10 +126,21 @@ de kaydedilebilir. Altta iki tuş var:
 Açıklama ve Sil fareyle kullanılır.
 </details>
 
+### 🧾 Alış Faturası
+
+Gelen tedarikçi faturası basitçe girilir: tedarikçi, fatura tarihi, **fatura no**
+(tedarikçinin numarası), KDV %, açıklama ve ürün satırları (ürün, miktar, KDV hariç birim
+fiyat). Vega'ya **Alış Faturası (tip 20)** olarak yazılır — desen galya kopyasındaki elle
+kesilmiş gerçek alış faturasından sütun sütun alındı: `TBLALFATBASLIK` / `TBLALFATHAREKET`
+(fiyat `AFIYATI`'nda), `TBLSTOKHAREKETLERI` (`GIREN`), `TBLDEPOENVANTER` (+miktar),
+`TBLCARIHAREKETLERI` (`ALACAK`, `OZELKOD` boş), `TBLCARIGENELHAREKET` (`BELGELINK` NULL).
+Numara programın kendi serisinden (`H…`). Stok kartının alış fiyatı güncellenir (daha eski
+tarihli fatura kartı ezmez); **✎** ile düzeltme ve **Geri Al** kartı eski fiyatına döndürür.
+
 ### 🧺 Kasa
 
 Müşteriye verilen kasalar borcuna eklenir; kasalar geri gelince buradan tek tuşla düşülür
-ve Vega'ya **Stok Giriş İade Fişi** olarak yazılır. İade tutarı kartın bugünkü bedelinden
+(isteğe bağlı **Fiş No** ile) ve Vega'ya **Stok Giriş İade Fişi** olarak yazılır. İade tutarı kartın bugünkü bedelinden
 değil, o müşteride açık duran **gerçek depozito borcundan** adet oranında hesaplanır:
 
 > 9 kasa 500 TL'den verilmiş, kart bedeli sonra 300 TL olmuş → 9 kasanın tamamı dönünce
@@ -156,10 +167,13 @@ Bir müşteriye tıklamak onu Ekstre'de aynı haftayla açar.
 ### 📄 Ekstre
 
 - **Ayrıntılı Rapor (fiş bazlı)** — `CİNSİ | K.ADET | K.TÜRÜ | K.TUTAR | FİYAT | TUTAR |
-  AÇIKLAMA | FİŞ NO`, fiş fiş gruplu, ara toplamlı, en altta genel toplam; *Geri Gelen
-  Kasalar*, ÖDEME ve BAKİYE blokları. Kasa her satırda kendi adediyle görünür; fişin
+  AÇIKLAMA | FİŞ NO`, fiş fiş gruplu, ara toplamlı, en altta genel toplam; ÖDEME ve
+  BAKİYE blokları, özetinde **TOPLAM TUTAR**. Kasa her satırda kendi adediyle görünür; fişin
   türe göre kasa dağılımı (`30 PK · 36 UP`) ara toplam satırında.
   Çıktı bilerek dar: ürünü çok olan müşteride sayfa sayısı düşük kalsın.
+- **Hareket tablosu** — belge tarihi, **işlem zamanı** (gün + saat), işlem, evrak no,
+  açıklama, **K.Adet** (verilen kasa +, geri gelen −), borç, alacak, bakiye; altta verilen /
+  geri gelen / müşteride açık kasa özeti.
 - **Toplu yazdırma** — her müşteri yeni sayfada; sonda boş sayfa çıkmaz.
 - Müşteri değişince aralık bu haftaya döner, açık ayrıntılı rapor yeni müşteri için yenilenir.
 - **Pazardan pazara gezinme**, **Haftalık Giriş/Çıkış tablosu** ve anında çalışan
@@ -167,7 +181,9 @@ Bir müşteriye tıklamak onu Ekstre'de aynı haftayla açar.
 
 ### 🗂️ Son Belgeler
 
-Tarih, tür, müşteri, fiş no, Vega belge no, tutar. Kutu boşken son 200 belge görünür; arama
+Belge tarihi, **işlem zamanı** (kaydın yapıldığı gün + saat — geçmiş tarihli girişte ikisi
+ayrı görünür), tür, müşteri, fiş no, Vega belge no, tutar. Satış, cari giriş, ödeme, kasa
+iadesi ve alış faturası **✎** ile düzeltilebilir. Kutu boşken son 200 belge görünür; arama
 sunucuda **bütün günlükte** (müşteri, fiş no, belge no, tür, kullanıcı, tarih) ve günlükte
 olmayan Vega belgelerinde (fatura notundaki fiş no dahil) yapılır. **✎** belgeyi forma geri açar: 1–2 kg gibi hatalar düzeltilip
 yeniden kaydedilir — eski ve yeni kayıt **tek transaction'da** değişir, yeni yazım
@@ -186,14 +202,14 @@ kod + 1), aynı kod kilitle engellenir. Özel Kod 1 Vega'nın tanım listesinden
 
 ### 💳 Ödemeler
 
-**Ödeme Al** — müşteri, tarih, tutar, yöntem (**Nakit (Kasa)** / **Havale** / **EFT**) ve
-açıklama; Vega'ya Cari Giriş tahsilatı olarak yazılır. Nakit `IZAHAT=1` + `TBLKASA`;
-havale/EFT Vega'nın kendi banka tahsilatları gibi `IZAHAT=11`, `PORTNO=-1`, `BANKANO=0`
-(kasaya ve banka hesabına işlenmez). Geri alma Son Belgeler'den.
+**Ödeme Al** — müşteri, tarih, tutar, **fiş no** ve açıklama; Vega'ya nakit Cari Giriş
+tahsilatı olarak yazılır (`IZAHAT=1` + `TBLKASA`). Yöntem seçimi 30.09.2026'da kalktı; eski
+Havale/EFT kaydı düzeltilirse yöntemi korunur (`IZAHAT=11`, kasaya işlenmez). Yanlış ödeme
+**✎** ile düzeltilir (eski kayıt silinip yenisi tek transaction'da) ya da geri alınır.
 
 **Ödeme Geçmişi** — Vega'nın defterinden (programdan girilmemiş tahsilatlar dahil): tarih,
-müşteri, belge no, yöntem, açıklama, tutar; yönteme göre toplamlar. Tek müşteri ya da
-bütün müşteriler; **Yazdır** ile çıktı.
+işlem zamanı, müşteri, fiş no, belge no, açıklama, tutar. Tek müşteri ya da bütün
+müşteriler; **Yazdır** ile çıktı.
 
 ## 🧠 Nasıl çalışır
 

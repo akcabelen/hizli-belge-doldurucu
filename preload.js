@@ -25,6 +25,7 @@ const KANALLAR = [
   'yazma:durum',
   'yazma:belge',
   'yazma:odeme',
+  'yazma:alisFaturasi',
   'yazma:belgeGeriAl',
   'yazma:kasaIade',
   'rapor:hafta',

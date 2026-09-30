@@ -173,6 +173,7 @@ uc('yardimci:islemDetay', async (girdi) => yardimci.islemDetayGetir(girdi));
 uc('yazma:durum', async () => ({ acik: yazma.yazmaAcikMi() }));
 uc('yazma:belge', async (girdi) => yazma.belgeYaz(girdi));
 uc('yazma:odeme', async (girdi) => yazma.odemeYaz(girdi));
+uc('yazma:alisFaturasi', async (girdi) => yazma.alisFaturasiKaydet(girdi));
 uc('yazma:belgeGeriAl', async (girdi) => yazma.belgeGeriAl(girdi));
 uc('yazma:kasaIade', async (girdi) => yazma.kasaIadesiYaz(girdi));
 

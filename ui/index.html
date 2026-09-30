@@ -13,6 +13,7 @@
   <div class="marka">Hızlı Belge Doldurucu</div>
   <nav class="sekmeler">
     <button class="sekme etkin" data-sekme="belge">Belge Gir</button>
+    <button class="sekme" data-sekme="alis">Alış Faturası</button>
     <button class="sekme" data-sekme="kasa">Kasa</button>
     <button class="sekme" data-sekme="rapor">Haftalık Rapor</button>
     <button class="sekme" data-sekme="ekstre">Ekstre</button>
@@ -120,8 +121,85 @@
     <div class="kutu gizli" id="sonKayit"></div>
   </section>
 
+  <!-- ══════════════════ ALIŞ FATURASI ══════════════════ -->
+  <!-- 30.09.2026 müşteri isteği: gelen alış faturaları basitçe girilsin.
+       Vega'ya Alış Faturası (tip 20) olarak yazılır: stok girer, tedarikçi
+       alacaklanır. Yazma: yazma:alisFaturasi (db/yazma.js → alisFaturasiKaydet). -->
+  <section class="sayfa" id="sayfa-alis">
+    <div class="kutu duzenlemeBilgi gizli" id="alisDuzenlemeBilgi"></div>
+    <div class="kutu">
+      <h2>Alış Faturası</h2>
+      <p class="ipucu">
+        Gelen faturayı buraya girin: ürünler depoya girer, tedarikçinin hesabına
+        fatura tutarı alacak yazılır ve ürün kartının alış fiyatı güncellenir.
+        Yanlış giriş Son Belgeler'den ✎ ile düzeltilir ya da geri alınır.
+      </p>
+      <div class="satirlar-ust">
+        <div class="alan buyuk">
+          <label for="alisCariArama">Tedarikçi</label>
+          <input type="text" id="alisCariArama" placeholder="İsim ya da kod yazın…" autocomplete="off">
+          <div id="alisCariSonuc" class="acilir gizli"></div>
+          <div id="alisCariSecili" class="secili gizli"></div>
+          <div class="altDugmeler">
+            <button type="button" class="dugme mini ikincil" data-cari-liste="alis">Listeden Seç</button>
+            <button type="button" class="dugme mini ikincil" data-cari-yeni="alis">+ Yeni Cari Kartı</button>
+          </div>
+        </div>
+        <div class="alan">
+          <label for="alisTarih">Fatura Tarihi</label>
+          <input type="date" id="alisTarih">
+        </div>
+        <div class="alan">
+          <label for="alisFaturaNo">Fatura No</label>
+          <input type="text" id="alisFaturaNo" maxlength="50" placeholder="tedarikçinin fatura no'su" autocomplete="off">
+        </div>
+        <div class="alan kucuk">
+          <label for="alisKdv">KDV %</label>
+          <input type="text" id="alisKdv" inputmode="decimal" autocomplete="off">
+        </div>
+        <div class="alan buyuk">
+          <label for="alisAciklama">Açıklama</label>
+          <input type="text" id="alisAciklama" maxlength="150" placeholder="(isteğe bağlı)" autocomplete="off">
+        </div>
+      </div>
+    </div>
+
+    <div class="kutu">
+      <table class="veri girdi" id="alisSatirTablo">
+        <thead>
+          <tr>
+            <th class="genis">Ürün</th>
+            <th class="sayi">Miktar</th>
+            <th>Birim</th>
+            <th class="sayi">Birim Fiyat (KDV hariç)</th>
+            <th class="sayi">Tutar</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="alisSatirGovde"></tbody>
+      </table>
+      <button class="dugme ikincil" id="alisSatirEkle">+ Satır Ekle</button>
+      <p class="ipucu klavyeIpucu">
+        <b>Tab</b> fiyattan sonra yeni satıra geçer · <b>↓</b> / <b>Enter</b> alttaki
+        satıra geçer, son satırdaysanız yeni satır açar · <b>↑</b> üste çıkar.
+      </p>
+    </div>
+
+    <div class="kutu toplamlar">
+      <div class="toplam"><span>Ara toplam</span><b id="alisAraToplam">0,00</b></div>
+      <div class="toplam"><span>KDV</span><b id="alisKdvToplam">0,00</b></div>
+      <div class="toplam genel"><span>Fatura toplamı</span><b id="alisGenelToplam">0,00</b></div>
+    </div>
+
+    <div class="kutu eylemler">
+      <button class="dugme birincil buyuk" id="alisKaydet">Alış Faturasını Kaydet</button>
+      <button class="dugme ucuncul" id="alisTemizle">Formu Temizle</button>
+    </div>
+  </section>
+
   <!-- ══════════════════ KASA ══════════════════ -->
   <section class="sayfa" id="sayfa-kasa">
+    <div class="kutu duzenlemeBilgi gizli" id="iadeDuzenlemeBilgi"></div>
     <div class="kutu">
       <h2>Kasa İadesi</h2>
       <p class="ipucu">
@@ -151,8 +229,13 @@
           <label for="iadeTarih">Tarih</label>
           <input type="date" id="iadeTarih">
         </div>
+        <div class="alan">
+          <label for="iadeFisNo">Fiş No</label>
+          <input type="text" id="iadeFisNo" maxlength="50" placeholder="(boş bırakılabilir)" autocomplete="off">
+        </div>
         <div class="alan dugmeAlani">
           <button class="dugme birincil" id="iadeKaydet">İadeyi Kaydet</button>
+          <button class="dugme ucuncul gizli" id="iadeDuzenlemeIptal">Düzenlemeyi İptal Et</button>
         </div>
       </div>
       <div id="iadeBilgi" class="ipucu"></div>
@@ -283,7 +366,8 @@
       <table class="veri" id="belgelerTablo">
         <thead>
           <tr>
-            <th>Tarih</th>
+            <th title="Belgenin tarihi (geçmişe dönük girilebilir)">Belge Tarihi</th>
+            <th title="İşlemin programda yapıldığı gün ve saat">İşlem Zamanı</th>
             <th>Tür</th>
             <th class="genis">Müşteri</th>
             <th>Fiş No</th>
@@ -340,6 +424,7 @@
           <select id="ekstreIslem">
             <option value="">Hepsi</option>
             <option value="21">Satış Faturası</option>
+            <option value="20">Alış Faturası</option>
             <option value="13">Tahsilat</option>
             <option value="11">Cari Çıkış</option>
             <option value="34">Kasa İadesi</option>
@@ -419,10 +504,12 @@
       <table class="veri" id="ekstreTablo">
         <thead>
           <tr>
-            <th>Tarih</th>
+            <th title="Belgenin tarihi">Tarih</th>
+            <th title="İşlemin yapıldığı gün ve saat">İşlem Zamanı</th>
             <th>İşlem</th>
             <th>Evrak No</th>
             <th class="genis">Açıklama</th>
+            <th class="sayi" title="Verilen kasa artı, geri gelen kasa eksi">K.Adet</th>
             <th class="sayi">Borç</th>
             <th class="sayi">Alacak</th>
             <th class="sayi">Bakiye</th>
@@ -436,12 +523,13 @@
 
   <!-- ══════════════════ ÖDEMELER ══════════════════ -->
   <section class="sayfa" id="sayfa-odeme">
+    <div class="kutu duzenlemeBilgi gizli" id="odemeDuzenlemeBilgi"></div>
     <div class="kutu">
       <h2>Ödeme Al</h2>
       <p class="ipucu">
-        Ödeme doğrudan Vega'ya <b>Cari Giriş (tahsilat)</b> olarak yazılır.
-        <b>Nakit</b> Vega kasasına da girer; <b>Havale</b> ve <b>EFT</b> kasaya
-        girmez. Yanlış girilen ödeme Son Belgeler'den geri alınır.
+        Ödeme doğrudan Vega'ya <b>Cari Giriş (tahsilat)</b> olarak yazılır ve
+        Vega kasasına da girer. Yanlış girilen ödeme aşağıdaki listeden ya da
+        Son Belgeler'den <b>✎</b> ile düzeltilir.
       </p>
       <div class="satirlar-ust">
         <div class="alan buyuk">
@@ -463,20 +551,17 @@
           <input type="text" id="odemeTutar" inputmode="decimal" placeholder="0,00" autocomplete="off">
         </div>
         <div class="alan">
-          <label for="odemeYontem">Ödeme Yöntemi</label>
-          <select id="odemeYontem">
-            <option value="nakit">Nakit (Kasa)</option>
-            <option value="havale">Havale</option>
-            <option value="eft">EFT</option>
-          </select>
+          <label for="odemeFisNo">Fiş No</label>
+          <input type="text" id="odemeFisNo" maxlength="50" placeholder="(boş bırakılabilir)" autocomplete="off">
         </div>
         <div class="alan buyuk">
           <label for="odemeAciklama">Açıklama</label>
           <input type="text" id="odemeAciklama" maxlength="200" autocomplete="off"
-                 placeholder="Örn. Ziraat havalesi, pazar tahsilatı…">
+                 placeholder="Örn. pazar tahsilatı…">
         </div>
         <div class="alan dugmeAlani">
           <button class="dugme birincil" id="odemeKaydet">Ödemeyi Kaydet</button>
+          <button class="dugme ucuncul gizli" id="odemeDuzenlemeIptal">Düzenlemeyi İptal Et</button>
         </div>
       </div>
     </div>
@@ -492,23 +577,9 @@
           <label for="odemeBitis">Bitiş</label>
           <input type="date" id="odemeBitis">
         </div>
-        <div class="alan">
-          <label for="odemeYontemSuzgec">Yöntem</label>
-          <select id="odemeYontemSuzgec">
-            <option value="">Hepsi</option>
-            <option value="nakit">Nakit (Kasa)</option>
-            <option value="havale">Havale</option>
-            <option value="eft">EFT</option>
-            <option value="banka">Banka (diğer)</option>
-            <option value="kart">Kredi Kartı</option>
-            <option value="cek">Çek</option>
-            <option value="senet">Senet</option>
-            <option value="diger">Belirtilmemiş</option>
-          </select>
-        </div>
         <div class="alan buyuk">
           <label for="odemeArama">Ara</label>
-          <input type="text" id="odemeArama" placeholder="müşteri, açıklama, belge no…" autocomplete="off">
+          <input type="text" id="odemeArama" placeholder="müşteri, fiş no, açıklama, belge no…" autocomplete="off">
         </div>
         <div class="alan dugmeAlani">
           <button class="dugme birincil" id="odemeGetir">Getir</button>
@@ -534,11 +605,13 @@
         <thead>
           <tr>
             <th>TARİH</th>
+            <th>İŞLEM ZAMANI</th>
             <th class="genis cariSutun">MÜŞTERİ</th>
+            <th>FİŞ NO</th>
             <th>BELGE NO</th>
-            <th>YÖNTEM</th>
             <th class="genis">AÇIKLAMA</th>
             <th class="sayi">TUTAR</th>
+            <th class="yazdirilmaz"></th>
           </tr>
         </thead>
         <tbody id="odemeRaporGovde"></tbody>

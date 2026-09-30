@@ -395,6 +395,8 @@ const ACIKLAMA_KAYNAKLARI = [
   { tablo: 'TBLCARCIKBASLIK', alan: 'ACIKLAMA', izahatlar: ['11'] },
   { tablo: 'TBLCARGIRBASLIK', alan: 'ACIKLAMA', izahatlar: ['13'] },
   { tablo: 'TBLSATFATBASLIK', alan: 'ALTNOT', izahatlar: ['21'] },
+  // Alış faturası (30.09.2026): tedarikçinin fatura no'su ve not ALTNOT'ta.
+  { tablo: 'TBLALFATBASLIK', alan: 'ALTNOT', izahatlar: ['20'] },
   // Kasa iadesi 24.08.2026'dan itibaren Stok Giriş İade Fişi olarak yazılıyor
   // (bkz. db/yazma.js → stokGirisIadesiYaz), açıklaması ALTNOT'ta duruyor.
   { tablo: 'TBLSTKGIRBASLIK', alan: 'ALTNOT', izahatlar: ['34'] }
@@ -433,6 +435,74 @@ async function aciklamaBaglari(v, firma, donem) {
   return { joinlar: joinlar.join(''), aciklamaIfadesi: ifade };
 }
 
+// 30.09.2026 müşteri raporu: "Ekstrede kasa adedi gözükmüyor". Vega'nın cari
+// hareketi yalnız para tutar; her hareketin kaç kasa taşıdığı programın kendi
+// günlüğünden bulunur (belge no ile):
+//   KS — Belge Gir'den yazılan belge (BD_BelgeSatir.KasaAdedi, verilen +)
+//   KI — Kasa iadesi (BD_KasaHareket.Adet, geri gelen −)
+//   KF — Günlükte olmayan, VegaWin'den kesilmiş faturanın KASA kalemleri
+// BD_ tabloları henüz kurulmamışsa (program hiç yazmamış) yalnız KF kalır.
+const bdOnbellek = new Map();
+
+async function bdTablolariVarMi(v) {
+  if (bdOnbellek.has(v)) return bdOnbellek.get(v);
+  const r = await sorgu(
+    `SELECT CASE WHEN OBJECT_ID('[${v}].dbo.BD_BelgeSatir', 'U') IS NOT NULL
+                  AND OBJECT_ID('[${v}].dbo.BD_KasaHareket', 'U') IS NOT NULL
+                  AND OBJECT_ID('[${v}].dbo.BD_Islem', 'U') IS NOT NULL
+             THEN 1 ELSE 0 END AS varMi`
+  );
+  const varMi = !!(r[0] && Number(r[0].varMi) === 1);
+  if (varMi) bdOnbellek.set(v, true); // yoksa sonradan kurulabilir, önbelleğe alma
+  return varMi;
+}
+
+async function ekstreKasaBaglari(v, firma, donem, parametreler) {
+  const joinlar = [];
+  const alanlar = [];
+  parametreler.bdFirma = firma;
+  parametreler.bdDonem = donem;
+
+  if (await bdTablolariVarMi(v)) {
+    joinlar.push(`
+      OUTER APPLY (
+        SELECT SUM(S.KasaAdedi) AS adet
+        FROM [${v}].dbo.BD_BelgeSatir S
+        WHERE S.Firma = @bdFirma AND S.Donem = @bdDonem AND S.CariInd = H.FIRMANO
+          AND S.GeriAlindi = 0 AND ISNULL(H.EVRAKNO, '') <> '' AND S.BelgeNo = H.EVRAKNO
+      ) KS
+      OUTER APPLY (
+        SELECT SUM(K.Adet) AS adet
+        FROM [${v}].dbo.BD_KasaHareket K
+        JOIN [${v}].dbo.BD_Islem I ON I.Id = K.IslemId
+        WHERE I.Firma = @bdFirma AND I.Donem = @bdDonem AND I.CariInd = H.FIRMANO
+          AND I.Konu = 'KasaIade' AND I.GeriAlindi = 0
+          AND ISNULL(H.EVRAKNO, '') <> '' AND I.BelgeNo = H.EVRAKNO
+      ) KI`);
+    alanlar.push('KS.adet', 'KI.adet');
+  }
+
+  if (await tabloVarMi(firma, donem, 'TBLSATFATBASLIK') &&
+      await tabloVarMi(firma, donem, 'TBLSATFATHAREKET')) {
+    joinlar.push(`
+      OUTER APPLY (
+        SELECT SUM(ISNULL(FH.MIKTAR, 0)) AS adet
+        FROM ${tablo(v, firma, donem, 'TBLSATFATBASLIK')} FB
+        JOIN ${tablo(v, firma, donem, 'TBLSATFATHAREKET')} FH ON FH.EVRAKNO = FB.IND
+        WHERE LTRIM(RTRIM(ISNULL(H.IZAHAT, ''))) = '21'
+          AND FB.FIRMANO = H.FIRMANO AND FB.BELGENO = H.EVRAKNO
+          AND ISNULL(FB.IPTAL, 0) = 0
+          AND CAST(FH.ACIKLAMA AS NVARCHAR(60)) = 'KASA'
+      ) KF`);
+    alanlar.push('KF.adet');
+  }
+
+  return {
+    joinlar: joinlar.join(''),
+    ifade: alanlar.length ? `COALESCE(${alanlar.join(', ')}, 0)` : '0'
+  };
+}
+
 async function cariEkstre(secenek) {
   const { firma, donem } = await dogrula(secenek && secenek.firma, secenek && secenek.donem);
   const v = vt();
@@ -467,19 +537,25 @@ async function cariEkstre(secenek) {
   }
 
   const { joinlar, aciklamaIfadesi } = await aciklamaBaglari(v, firma, donem);
+  const hareketTablosu = tablo(v, firma, donem, 'TBLCARIHAREKETLERI');
+  const islemTarihiVar = await kolonVarMi(hareketTablosu, 'ISLEMTARIHI');
+  const kasa = await ekstreKasaBaglari(v, firma, donem, parametreler);
 
   const satirlar = await sorgu(
     `
     SELECT TOP ${limit}
       H.IND AS ind,
       H.TARIH AS tarih,
+      ${islemTarihiVar ? 'H.ISLEMTARIHI' : 'NULL'} AS islemTarihi,
       ISNULL(H.IZAHAT, '') AS izahat,
       ISNULL(H.EVRAKNO, '') AS evrakNo,
       ${aciklamaIfadesi} AS aciklama,
+      ${kasa.ifade} AS kasaAdedi,
       ISNULL(H.BORC, 0) AS borc,
       ISNULL(H.ALACAK, 0) AS alacak
-    FROM ${tablo(v, firma, donem, 'TBLCARIHAREKETLERI')} H
+    FROM ${hareketTablosu} H
     ${joinlar}
+    ${kasa.joinlar}
     WHERE H.FIRMANO = @cariInd AND ISNULL(H.OZELKOD, '') <> 'KREDIHESABI'
       ${tarihFiltresi.replace(/TARIH/g, 'H.TARIH')}
     ORDER BY H.TARIH, H.IND
@@ -495,10 +571,12 @@ async function cariEkstre(secenek) {
     return {
       ind: Number(s.ind),
       tarih: s.tarih,
+      islemTarihi: s.islemTarihi || null,
       izahat: String(s.izahat || '').trim(),
       izahatAdi: izahatAdi(s.izahat),
       evrakNo: String(s.evrakNo || '').trim(),
       aciklama: String(s.aciklama || '').trim(),
+      kasaAdedi: Number(s.kasaAdedi) || 0,
       borc,
       alacak,
       bakiye: yuruyen

@@ -151,6 +151,39 @@ async function hazirla(zorla) {
       CREATE INDEX IX_BD_BelgeSatir_Hafta ON [${db}].dbo.BD_BelgeSatir (Firma, Donem, Tarih, CariInd);
   `);
 
+  // 30.09.2026 müşteri isteği: ödeme ve kasa iadesine de fiş no girilebilsin;
+  // geçmiş tarihli girişte belge tarihi ile işlemin yapıldığı an (tarih + saat)
+  // ayrı ayrı görünsün. BD_Islem.Tarih belge tarihidir; kayıt anı yeni
+  // KayitTarihi sütununda. Mevcut satırlara GETDATE yazılmasın diye sütun
+  // NULL eklenir (WITH VALUES yok) ve bilinen kayıt anı aşağıda geri doldurulur.
+  await calistir(`
+    IF COL_LENGTH('[${db}].dbo.BD_Islem', 'FisNo') IS NULL
+      ALTER TABLE [${db}].dbo.BD_Islem ADD FisNo NVARCHAR(50) NULL;
+
+    IF COL_LENGTH('[${db}].dbo.BD_Islem', 'KayitTarihi') IS NULL
+      ALTER TABLE [${db}].dbo.BD_Islem ADD KayitTarihi DATETIME NULL
+        CONSTRAINT DF_BD_Islem_KayitTarihi DEFAULT GETDATE();
+
+    -- Ödeme geçmişi ve ekstre her satır için programın kaydını cariden arar.
+    IF NOT EXISTS (SELECT 1 FROM [${db}].sys.indexes
+                   WHERE name = 'IX_BD_Islem_Cari'
+                     AND object_id = OBJECT_ID('[${db}].dbo.BD_Islem'))
+      CREATE INDEX IX_BD_Islem_Cari ON [${db}].dbo.BD_Islem (Firma, CariInd);
+  `);
+
+  // Ayrı batch: yeni sütun aynı batch içinde derlenemez.
+  await calistir(`
+    UPDATE I SET KayitTarihi = X.an
+    FROM [${db}].dbo.BD_Islem I
+    CROSS APPLY (
+      SELECT COALESCE(
+        (SELECT MIN(S.OlusturmaTarihi) FROM [${db}].dbo.BD_BelgeSatir S WHERE S.IslemId = I.Id),
+        (SELECT MIN(K.OlusturmaTarihi) FROM [${db}].dbo.BD_KasaHareket K WHERE K.IslemId = I.Id)
+      ) AS an
+    ) X
+    WHERE I.KayitTarihi IS NULL AND X.an IS NOT NULL;
+  `);
+
   hazirlandiVt = db;
   return { tamam: true };
 }
@@ -361,16 +394,19 @@ async function islemYaz(t, kayit) {
     belgeNo: kayit.belgeNo || null,
     tutar: kayit.tutar != null ? Number(kayit.tutar) : null,
     aciklama: kayit.aciklama || null,
+    fisNo: kayit.fisNo ? String(kayit.fisNo).trim().substring(0, 50) : null,
     yazilan: kayit.yazilan ? JSON.stringify(kayit.yazilan) : null,
     kullanici: k.kullanici,
     bilgisayar: k.bilgisayar
   };
+  // KayitTarihi yazılmıyor: sütunun GETDATE varsayılanı işlemin yapıldığı anı
+  // sunucu saatiyle verir.
   const sorguMetni = `
     INSERT INTO [${db}].dbo.BD_Islem
-      (Tarih, Konu, Firma, Donem, CariInd, CariAd, BelgeNo, Tutar, Aciklama, Yazilan, Kullanici, Bilgisayar)
+      (Tarih, Konu, Firma, Donem, CariInd, CariAd, BelgeNo, Tutar, Aciklama, FisNo, Yazilan, Kullanici, Bilgisayar)
     OUTPUT INSERTED.Id AS id
     VALUES
-      (@tarih, @konu, @firma, @donem, @cariInd, @cariAd, @belgeNo, @tutar, @aciklama, @yazilan, @kullanici, @bilgisayar)
+      (@tarih, @konu, @firma, @donem, @cariInd, @cariAd, @belgeNo, @tutar, @aciklama, @fisNo, @yazilan, @kullanici, @bilgisayar)
   `;
   const r = t ? await t.sorgu(sorguMetni, alanlar) : await sorgu(sorguMetni, alanlar);
   return Number(r[0].id);
@@ -386,10 +422,100 @@ async function islemGetir(id) {
 // Son Belgeler'deki kalem düğmesi için güvenli, düzenlenebilir belge özeti.
 // Vega bağlantı listesi (Yazilan) arayüze açılmaz; yalnız formu yeniden
 // doldurmak için gereken müşteri, satır ve tahsilat bilgileri döner.
+// Ödemeden program önekini ("NAKİT - ", "HAVALE tahsilat", "Fiş 12 - ")
+// ayıklayıp kullanıcının yazdığı notu verir — eski kayıtlarda not ayrıca
+// saklanmıyordu.
+function odemeNotunuAyikla(aciklama) {
+  let m = String(aciklama || '').trim();
+  m = m.replace(/^(NAK[İI]T|HAVALE|EFT)\s*(-\s*|tahsilat\s*$|$)/i, '').trim();
+  m = m.replace(/^Fi[şs]\s+\S+\s*(-\s*|$)/i, '').trim();
+  return /^tahsilat$/i.test(m) ? '' : m;
+}
+
+async function cariBakiyesiOku(kayit) {
+  try {
+    return await vega.cariBakiye({
+      firma: kayit.Firma,
+      donem: kayit.Donem,
+      cariInd: Number(kayit.CariInd)
+    });
+  } catch (e) {
+    return 0; // Form yine açılır; bakiye yalnız bilgilendirme amaçlı.
+  }
+}
+
+// 30.09.2026 müşteri isteği: "düşülen paraları düzeltemiyoruz, sadece geri
+// alabiliyoruz". Ödeme ve kasa iadesi de formda yeniden açılabiliyor; yazma
+// tarafı eskiyi silip yenisini tek transaction'da yazar (yazma.js → odemeYaz,
+// kasaIadesiYaz).
+async function odemeDetayi(id, kayit) {
+  let yazilan = [];
+  try { yazilan = JSON.parse(kayit.Yazilan || '[]'); } catch (e) { yazilan = []; }
+  const ilk = yazilan[0] || {};
+  return {
+    islemId: id,
+    tur: 'odeme',
+    firma: kayit.Firma,
+    donem: kayit.Donem,
+    tarih: kayit.Tarih,
+    fisNo: kayit.FisNo || ilk.fisNo || '',
+    tutar: Number(kayit.Tutar) || 0,
+    aciklama: ilk.not != null ? String(ilk.not) : odemeNotunuAyikla(kayit.Aciklama),
+    cari: { cariInd: Number(kayit.CariInd), ad: kayit.CariAd || '', bakiye: await cariBakiyesiOku(kayit) }
+  };
+}
+
+async function kasaIadeDetayi(id, kayit) {
+  const k = (await sorgu(
+    `SELECT TOP 1 StokNo, StokKodu, StokAdi, Adet, Tarih
+     FROM [${vt()}].dbo.BD_KasaHareket WHERE IslemId = @id ORDER BY Id`,
+    { id }
+  ))[0];
+  if (!k) throw new Error('Bu kasa iadesinin kasa defteri kaydı bulunamadı.');
+  return {
+    islemId: id,
+    tur: 'kasaIade',
+    firma: kayit.Firma,
+    donem: kayit.Donem,
+    tarih: k.Tarih || kayit.Tarih,
+    fisNo: kayit.FisNo || '',
+    stokNo: Number(k.StokNo),
+    stokKodu: k.StokKodu || '',
+    adet: Math.abs(Number(k.Adet) || 0),
+    cari: { cariInd: Number(kayit.CariInd), ad: kayit.CariAd || '', bakiye: await cariBakiyesiOku(kayit) }
+  };
+}
+
+// Alış faturası satırları Vega'da da duruyor ama formu doldurmak için
+// yazılan kaydın kendi özeti yeterli (stok no, miktar, fiyat).
+async function alisFaturasiDetayi(id, kayit) {
+  let yazilan = [];
+  try { yazilan = JSON.parse(kayit.Yazilan || '[]'); } catch (e) { yazilan = []; }
+  const f = yazilan.find((y) => y && y.tur === 'alisFaturasi') || {};
+  return {
+    islemId: id,
+    tur: 'alisFaturasi',
+    firma: kayit.Firma,
+    donem: kayit.Donem,
+    tarih: kayit.Tarih,
+    faturaNo: kayit.FisNo || f.faturaNo || '',
+    aciklama: f.not || '',
+    kdvOrani: Number(f.kdvOrani) || 0,
+    satirlar: (f.satirlar || []).map((s) => ({
+      stokNo: Number(s.stokNo), stokKodu: s.stokKodu || '', stokAdi: s.stokAdi || '',
+      miktar: Number(s.miktar) || 0, fiyat: Number(s.fiyat) || 0
+    })),
+    cari: { cariInd: Number(kayit.CariInd), ad: kayit.CariAd || '', bakiye: await cariBakiyesiOku(kayit) }
+  };
+}
+
 async function islemDetayGetir(secenek) {
   const id = Number(secenek && secenek.islemId);
   const kayit = await islemGetir(id);
   if (kayit.GeriAlindi) throw new Error('Geri alınmış belge düzenlenemez.');
+  if (kayit.Konu === 'tahsilat') return odemeDetayi(id, kayit);
+  if (kayit.Konu === 'KasaIade') return kasaIadeDetayi(id, kayit);
+  if (kayit.Konu === 'alisFaturasi') return alisFaturasiDetayi(id, kayit);
   if (kayit.Konu !== 'satisFaturasi' && kayit.Konu !== 'cariCikis') {
     throw new Error('Bu belge türü düzenlenemez.');
   }
@@ -415,18 +541,12 @@ async function islemDetayGetir(secenek) {
   const tahsilatKaydi = yazilan.find((y) => y && y.tur === 'tahsilat');
   const fisNo = satirlar[0] && satirlar[0].FisNo
     ? String(satirlar[0].FisNo).trim()
-    : String(kayit.Aciklama || '').replace(/^Fiş\s+/i, '').trim();
-  let bakiye = 0;
-  try {
-    bakiye = await vega.cariBakiye({
-      firma: kayit.Firma,
-      donem: kayit.Donem,
-      cariInd: Number(kayit.CariInd)
-    });
-  } catch (e) { /* Form yine açılır; bakiye yalnız bilgilendirme amaçlı. */ }
+    : (kayit.FisNo || String(kayit.Aciklama || '').replace(/^Fiş\s+/i, '').trim());
+  const bakiye = await cariBakiyesiOku(kayit);
 
   return {
     islemId: id,
+    tur: 'belge',
     firma: kayit.Firma,
     donem: kayit.Donem,
     belgeTuru: kayit.Konu,
@@ -496,8 +616,9 @@ async function sonIslemleriGetir(secenek) {
                   WHEN 'cariCikis' THEN N'Cari Giriş'
                   WHEN 'tahsilat' THEN N'Tahsilat Ödeme'
                   WHEN 'KasaIade' THEN N'Kasa İadesi'
+                  WHEN 'alisFaturasi' THEN N'Alış Faturası'
                   ELSE ISNULL(I.Konu, '') END + ' ' +
-      CONVERT(NVARCHAR(10), I.Tarih, 104) + ' ' +
+      CONVERT(NVARCHAR(10), I.Tarih, 104) + ' ' + ISNULL(I.FisNo, '') + ' ' +
       ISNULL((SELECT TOP 1 X.FisNo FROM [${db}].dbo.BD_BelgeSatir X
               WHERE X.IslemId = I.Id AND ISNULL(X.FisNo, '') <> ''), ''))`;
     kosullar.push(...aramaKosulu(metin, parcalar, parametreler, 'ara'));
@@ -513,8 +634,12 @@ async function sonIslemleriGetir(secenek) {
              I.Tarih
            ) AS Tarih,
            I.Konu, I.Firma, I.Donem, I.CariInd, I.CariAd, I.BelgeNo,
-           (SELECT TOP 1 S.FisNo FROM [${db}].dbo.BD_BelgeSatir S
-            WHERE S.IslemId = I.Id AND ISNULL(S.FisNo, '') <> '') AS FisNo,
+           COALESCE(
+             (SELECT TOP 1 S.FisNo FROM [${db}].dbo.BD_BelgeSatir S
+              WHERE S.IslemId = I.Id AND ISNULL(S.FisNo, '') <> ''),
+             NULLIF(I.FisNo, '')
+           ) AS FisNo,
+           I.KayitTarihi,
            I.Tutar, I.Aciklama, I.GeriAlindi, I.Kullanici, I.Bilgisayar
     FROM [${db}].dbo.BD_Islem I
     ${kosullar.length ? 'WHERE ' + kosullar.join(' AND ') : ''}
@@ -537,6 +662,7 @@ async function vegaBelgeleriniAra(firmaHam, donemHam, parcalar, limit) {
   const v = vt();
   const kaynaklar = [
     { ad: 'TBLSATFATBASLIK', not: 'ALTNOT', konu: 'vegaSatisFaturasi' },
+    { ad: 'TBLALFATBASLIK', not: 'ALTNOT', konu: 'vegaAlisFaturasi' },
     { ad: 'TBLCARGIRBASLIK', not: 'ACIKLAMA', konu: 'vegaCariGiris' },
     { ad: 'TBLCARCIKBASLIK', not: 'ACIKLAMA', konu: 'vegaCariCikis' }
   ];
@@ -580,6 +706,7 @@ async function vegaBelgeleriniAra(firmaHam, donemHam, parcalar, limit) {
         CariAd: s.CariAd || '',
         BelgeNo: String(s.BelgeNo || '').trim(),
         FisNo: fis ? fis[1] : null,
+        KayitTarihi: null,
         Tutar: Number(s.Tutar) || 0,
         Aciklama: not,
         GeriAlindi: false,

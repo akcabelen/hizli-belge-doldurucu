@@ -36,7 +36,8 @@
 const { sorgu } = require('./sql');
 const { ayarOku } = require('./ayar');
 const { dogrula, tablo, kart, tabloVarMi } = require('./firma');
-const { izahatAdi, aciklamaBaglari, musteriTipiFiltresi } = require('./vega');
+const { izahatAdi, aciklamaBaglari, musteriTipiFiltresi, kolonVarMi } = require('./vega');
+const yardimci = require('./yardimci');
 
 function vt() {
   return ayarOku().vegaVeritabani;
@@ -540,22 +541,8 @@ async function haftalikDetay(secenek) {
   }));
   const odemeToplam = odemeler.reduce((t, s) => t + s.alinan, 0);
 
-  // Geri gelen kasalar — raporun "K SAYISI / K TÜRÜ / K TUTARI" bloğu.
-  const k = await sorgu(
-    `SELECT ISNULL(StokKodu, ISNULL(StokAdi, '')) AS tur,
-            SUM(-Adet) AS adet, SUM(-Tutar) AS tutar
-     FROM [${v}].dbo.BD_KasaHareket
-     WHERE Firma = @firma AND CariInd = @cariInd AND Yon = 'iade'
-       AND Tarih >= @bas AND Tarih <= @bitis
-     GROUP BY ISNULL(StokKodu, ISNULL(StokAdi, ''))
-     HAVING SUM(-Adet) <> 0`,
-    { firma, cariInd, bas: baslangic, bitis }
-  );
-  const kasaIadeleri = k.map((s) => ({
-    tur: String(s.tur || '').trim(),
-    adet: Number(s.adet) || 0,
-    tutar: Number(s.tutar) || 0
-  }));
+  // "Geri Gelen Kasalar" bloğu 30.09.2026 müşteri isteğiyle çıktıdan
+  // kaldırıldı; iadenin parası yukarıdaki ÖDEME satırlarında zaten görünüyor.
 
   return {
     baslangic, bitis,
@@ -571,7 +558,6 @@ async function haftalikDetay(secenek) {
     toplam: urunTutari + kasaTutari,
     odemeler,
     odemeToplam,
-    kasaIadeleri,
     haftaBorc,
     haftaAlacak,
     bakiye: devir + haftaBorc - haftaAlacak
@@ -618,11 +604,22 @@ function odemeYontemiCoz(izahat, odemeAraci, satirAciklamasi) {
   }
 }
 
+// Fiş no önce programın kaydından; Vega'dan elle girilmiş ödemede başlık
+// açıklamasındaki "Fiş 123" / "fis 123" kalıbından okunur.
+function odemeFisNo(kayittan, baslik) {
+  const k = String(kayittan || '').trim();
+  if (k) return k;
+  const e = /(?:^|[\s-])fi[şs]\s+([^\s-]+)/i.exec(String(baslik || ''));
+  return e ? e[1] : '';
+}
+
 // "HAVALE - 7 Eylül" gibi program açıklamasının başındaki yöntem adı, yöntem
-// sütununda zaten yazdığı için tekrarlanmaz.
+// sütununda zaten yazdığı için tekrarlanmaz. "Fiş 123 - " öneki de FİŞ NO
+// sütununda durduğu için atılır.
 function odemeNotu(baslik, satir) {
   const temiz = (m) => String(m || '').trim()
     .replace(/^(NAK[İI]T|HAVALE|EFT)\s*(-\s*|tahsilat\s*$|$)/i, '')
+    .replace(/^Fi[şs]\s+\S+\s*(-\s*|$)/i, '')
     .trim();
   const parcalar = [temiz(baslik), temiz(satir)].filter(Boolean);
   const tekil = parcalar.filter((p, i) =>
@@ -632,11 +629,13 @@ function odemeNotu(baslik, satir) {
 
 async function odemeGecmisi(secenek) {
   const { firma, donem } = await dogrula(secenek && secenek.firma, secenek && secenek.donem);
+  await yardimci.hazirla();
   const v = vt();
   const hareketTablosu = tablo(v, firma, donem, 'TBLCARIHAREKETLERI');
   const cariInd = Number(secenek && secenek.cariInd) || null;
+  const islemTarihiVar = await kolonVarMi(hareketTablosu, 'ISLEMTARIHI');
 
-  const parametreler = {};
+  const parametreler = { firma };
   const kosullar = [];
   if (cariInd) {
     kosullar.push('H.FIRMANO = @cariInd');
@@ -665,19 +664,37 @@ async function odemeGecmisi(secenek) {
   // Başlık LN ile bağlı; LN'si boş eski kayıtta cari + belge no ile bulunur.
   // Bir tahsilat fişinde birden çok ödeme satırı (ör. nakit + kart) olabilir,
   // bu yüzden satırlar ayrı ayrı geliyor ve JavaScript'te birleştiriliyor.
+  //
+  // 30.09.2026: FİŞ NO ve düzeltme için programın kendi kaydı (BD_Islem)
+  // belge numarasıyla bulunur. Belge Gir'deki tahsilatın kaydında BelgeNo
+  // "A1 / A2" gibi birleşik durur, bu yüzden parça olarak aranır. Kayıt anı
+  // Vega'nın ISLEMTARIHI'nden (GETDATE ile yazılır) okunur.
   const satirlar = await sorgu(`
     SELECT TOP 5000
       H.IND AS ind, H.TARIH AS tarih, H.FIRMANO AS cariInd,
+      ${islemTarihiVar ? 'H.ISLEMTARIHI' : 'NULL'} AS islemTarihi,
       ${AD_IFADESI} AS cariAd,
       LTRIM(RTRIM(ISNULL(H.IZAHAT, ''))) AS izahat,
       ISNULL(H.EVRAKNO, '') AS belgeNo,
       ISNULL(H.ALACAK, 0) AS alacak,
+      P.Id AS islemId, P.Konu AS islemKonu, P.KayitTarihi AS kayitTarihi,
+      COALESCE(NULLIF(P.FisNo, ''),
+        (SELECT TOP 1 S.FisNo FROM [${v}].dbo.BD_BelgeSatir S
+         WHERE S.IslemId = P.Id AND ISNULL(S.FisNo, '') <> '')) AS fisNo,
       ${girisVar ? 'B.baslikAciklama' : "''"} AS baslikAciklama,
       ${girisVar ? 'R.arac' : 'NULL'} AS arac,
       ${girisVar ? 'R.satirTutar' : 'NULL'} AS satirTutar,
       ${girisVar ? 'R.satirAciklama' : "''"} AS satirAciklama
     FROM ${hareketTablosu} H
     LEFT JOIN ${kart(v, firma, 'TBLCARI')} C ON C.IND = H.FIRMANO
+    OUTER APPLY (
+      SELECT TOP 1 I.Id, I.Konu, I.FisNo, I.KayitTarihi
+      FROM [${v}].dbo.BD_Islem I
+      WHERE I.Firma = @firma AND I.CariInd = H.FIRMANO AND I.GeriAlindi = 0
+        AND ISNULL(H.EVRAKNO, '') <> ''
+        AND CHARINDEX(' / ' + H.EVRAKNO + ' / ', ' / ' + ISNULL(I.BelgeNo, '') + ' / ') > 0
+      ORDER BY I.Id DESC
+    ) P
     ${girisVar ? `
     OUTER APPLY (
       SELECT TOP 1 GB.IND, CAST(GB.ACIKLAMA AS NVARCHAR(500)) AS baslikAciklama
@@ -710,12 +727,17 @@ async function odemeGecmisi(secenek) {
 
   const sonuc = [];
   for (const { ana, parcalar } of hareketler.values()) {
+    const fisNo = odemeFisNo(ana.fisNo, ana.baslikAciklama);
     const ortak = {
       ind: Number(ana.ind),
       tarih: ana.tarih,
+      kayitZamani: ana.kayitTarihi || ana.islemTarihi || null,
       cariInd: Number(ana.cariInd),
       cariAd: String(ana.cariAd || '').trim(),
-      belgeNo: String(ana.belgeNo || '').trim()
+      belgeNo: String(ana.belgeNo || '').trim(),
+      fisNo,
+      islemId: ana.islemId != null ? Number(ana.islemId) : null,
+      islemKonu: ana.islemKonu || null
     };
     const alacak = Number(ana.alacak) || 0;
     const yontemler = new Set(parcalar.map((p) => odemeYontemiCoz(ana.izahat, p.arac, p.satirAciklama)));
@@ -769,5 +791,5 @@ module.exports = {
   haftalikOzet,
   haftalikDetay,
   odemeGecmisi,
-  _test: { fisNoCoz, kasaTurleriniTopla, fislereBol, odemeAciklamasi, odemeYontemiCoz, odemeNotu }
+  _test: { fisNoCoz, kasaTurleriniTopla, fislereBol, odemeAciklamasi, odemeYontemiCoz, odemeNotu, odemeFisNo }
 };
