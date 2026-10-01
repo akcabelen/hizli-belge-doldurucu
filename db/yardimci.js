@@ -25,6 +25,10 @@ function vt() {
 }
 
 let hazirlandiVt = null;
+// Aynı anda gelen hazirla çağrıları tek kurulumu bekler (aşağıya bkz.).
+let hazirlaniyor = null;
+// BD_Islem.FisNo / KayitTarihi var mı — göç yapılamadıysa sorgular bunlarsız çalışır.
+let islemEkKolonlari = false;
 
 // Şemayı VEGADB içinde kurar. Var olanı bozmaz; yalnızca eksik olanı ekler.
 // 24.08.2026: dördüncü tablo eklendi — BD_BelgeSatir. Sebebi: haftalık müşteri
@@ -38,9 +42,26 @@ let hazirlandiVt = null;
 // Bunun çalışması için SQL kullanıcısının VEGADB üzerinde CREATE TABLE
 // yetkisi (db_owner ya da db_ddladmin+db_datawriter) olması gerekir —
 // kurulum/sql-kullanici-olustur.sql bunu artık baştan veriyor.
+//
+// 01.10.2026 saha raporu: v1.9.0'a güncellenen makinede Kasa İadesi'nin kasa
+// listesi boş geldi. Güncellemeden sonraki ilk açılışta otomatik bakım
+// (kurulum/kasa-kartlarini-onar, gecmis-belgeleri-duzelt) ile arayüz hazirla'yı
+// AYNI ANDA çağırıyordu; yeni BD_Islem sütunlarını iki bağlantı birden eklemeye
+// çalışınca biri "sütun birden fazla" hatası alıyor, o çağrının sahibi (kasa
+// tipi listesi) boş kalıyordu. Artık eşzamanlı çağrılar aynı kurulumu bekler;
+// BD_Islem göçü de ayrı ve hata verse bile çekirdeği durdurmaz (aşağıda).
 async function hazirla(zorla) {
   const db = vt();
   if (hazirlandiVt === db && !zorla) return { tamam: true, zatenHazir: true };
+  if (hazirlaniyor && hazirlaniyor.db === db) return hazirlaniyor.soz;
+  const soz = hazirlaAsil(db).finally(() => {
+    if (hazirlaniyor && hazirlaniyor.soz === soz) hazirlaniyor = null;
+  });
+  hazirlaniyor = { db, soz };
+  return soz;
+}
+
+async function hazirlaAsil(db) {
 
   // BD_KasaTipi eski şekli Vega stok kartına bağlıydı (StokNo = Vega IND).
   // Gerçekte kasa tipleri (PK, SBÜYÜK, SMUZ, UP...) Vega'da hiç yok — eski
@@ -151,41 +172,73 @@ async function hazirla(zorla) {
       CREATE INDEX IX_BD_BelgeSatir_Hafta ON [${db}].dbo.BD_BelgeSatir (Firma, Donem, Tarih, CariInd);
   `);
 
-  // 30.09.2026 müşteri isteği: ödeme ve kasa iadesine de fiş no girilebilsin;
-  // geçmiş tarihli girişte belge tarihi ile işlemin yapıldığı an (tarih + saat)
-  // ayrı ayrı görünsün. BD_Islem.Tarih belge tarihidir; kayıt anı yeni
-  // KayitTarihi sütununda. Mevcut satırlara GETDATE yazılmasın diye sütun
-  // NULL eklenir (WITH VALUES yok) ve bilinen kayıt anı aşağıda geri doldurulur.
+  try {
+    await islemGocu(db);
+  } catch (e) {
+    // Başka bir bilgisayar aynı anda eklediyse sütun zaten vardır; yetki ya da
+    // kilit yüzünden eklenemediyse fiş no / işlem zamanı bu oturumda
+    // yazılmaz ama belge girişi çalışmaya devam eder.
+    console.error('[hazirla] BD_Islem göçü tamamlanamadı:', e.message);
+  }
+  const k = (await sorgu(
+    `SELECT COL_LENGTH('[${db}].dbo.BD_Islem', 'FisNo') AS fis,
+            COL_LENGTH('[${db}].dbo.BD_Islem', 'KayitTarihi') AS kayit`
+  ))[0] || {};
+  islemEkKolonlari = k.fis != null && k.kayit != null;
+
+  hazirlandiVt = db;
+  return { tamam: true, islemEkKolonlari };
+}
+
+// 30.09.2026 müşteri isteği: ödeme ve kasa iadesine de fiş no girilebilsin;
+// geçmiş tarihli girişte belge tarihi ile işlemin yapıldığı an (tarih + saat)
+// ayrı ayrı görünsün. BD_Islem.Tarih belge tarihidir; kayıt anı yeni
+// KayitTarihi sütununda. Mevcut satırlara GETDATE yazılmasın diye sütun
+// NULL eklenir (WITH VALUES yok); bilinen kayıt anı yalnız sütunun eklendiği
+// açılışta bir kez geri doldurulur (her açılışta taramasın).
+async function islemGocu(db) {
+  const once = (await sorgu(
+    `SELECT COL_LENGTH('[${db}].dbo.BD_Islem', 'FisNo') AS fis,
+            COL_LENGTH('[${db}].dbo.BD_Islem', 'KayitTarihi') AS kayit`
+  ))[0] || {};
+
+  if (once.fis == null || once.kayit == null) {
+    await calistir(`
+      IF COL_LENGTH('[${db}].dbo.BD_Islem', 'FisNo') IS NULL
+        ALTER TABLE [${db}].dbo.BD_Islem ADD FisNo NVARCHAR(50) NULL;
+
+      IF COL_LENGTH('[${db}].dbo.BD_Islem', 'KayitTarihi') IS NULL
+        ALTER TABLE [${db}].dbo.BD_Islem ADD KayitTarihi DATETIME NULL
+          CONSTRAINT DF_BD_Islem_KayitTarihi DEFAULT GETDATE();
+    `);
+  }
+
+  // Ödeme geçmişi ve ekstre her satır için programın kaydını cariden arar.
   await calistir(`
-    IF COL_LENGTH('[${db}].dbo.BD_Islem', 'FisNo') IS NULL
-      ALTER TABLE [${db}].dbo.BD_Islem ADD FisNo NVARCHAR(50) NULL;
-
-    IF COL_LENGTH('[${db}].dbo.BD_Islem', 'KayitTarihi') IS NULL
-      ALTER TABLE [${db}].dbo.BD_Islem ADD KayitTarihi DATETIME NULL
-        CONSTRAINT DF_BD_Islem_KayitTarihi DEFAULT GETDATE();
-
-    -- Ödeme geçmişi ve ekstre her satır için programın kaydını cariden arar.
     IF NOT EXISTS (SELECT 1 FROM [${db}].sys.indexes
                    WHERE name = 'IX_BD_Islem_Cari'
                      AND object_id = OBJECT_ID('[${db}].dbo.BD_Islem'))
       CREATE INDEX IX_BD_Islem_Cari ON [${db}].dbo.BD_Islem (Firma, CariInd);
   `);
 
-  // Ayrı batch: yeni sütun aynı batch içinde derlenemez.
-  await calistir(`
-    UPDATE I SET KayitTarihi = X.an
-    FROM [${db}].dbo.BD_Islem I
-    CROSS APPLY (
-      SELECT COALESCE(
-        (SELECT MIN(S.OlusturmaTarihi) FROM [${db}].dbo.BD_BelgeSatir S WHERE S.IslemId = I.Id),
-        (SELECT MIN(K.OlusturmaTarihi) FROM [${db}].dbo.BD_KasaHareket K WHERE K.IslemId = I.Id)
-      ) AS an
-    ) X
-    WHERE I.KayitTarihi IS NULL AND X.an IS NOT NULL;
-  `);
+  if (once.kayit == null) {
+    // Ayrı batch: yeni sütun aynı batch içinde derlenemez.
+    await calistir(`
+      UPDATE I SET KayitTarihi = X.an
+      FROM [${db}].dbo.BD_Islem I
+      CROSS APPLY (
+        SELECT COALESCE(
+          (SELECT MIN(S.OlusturmaTarihi) FROM [${db}].dbo.BD_BelgeSatir S WHERE S.IslemId = I.Id),
+          (SELECT MIN(K.OlusturmaTarihi) FROM [${db}].dbo.BD_KasaHareket K WHERE K.IslemId = I.Id)
+        ) AS an
+      ) X
+      WHERE I.KayitTarihi IS NULL AND X.an IS NOT NULL;
+    `);
+  }
+}
 
-  hazirlandiVt = db;
-  return { tamam: true };
+function islemEkKolonlariVarMi() {
+  return islemEkKolonlari;
 }
 
 function kimlik(kullanici) {
@@ -401,12 +454,14 @@ async function islemYaz(t, kayit) {
   };
   // KayitTarihi yazılmıyor: sütunun GETDATE varsayılanı işlemin yapıldığı anı
   // sunucu saatiyle verir.
+  const fisSutunu = islemEkKolonlari ? ', FisNo' : '';
+  const fisDegeri = islemEkKolonlari ? ', @fisNo' : '';
   const sorguMetni = `
     INSERT INTO [${db}].dbo.BD_Islem
-      (Tarih, Konu, Firma, Donem, CariInd, CariAd, BelgeNo, Tutar, Aciklama, FisNo, Yazilan, Kullanici, Bilgisayar)
+      (Tarih, Konu, Firma, Donem, CariInd, CariAd, BelgeNo, Tutar, Aciklama${fisSutunu}, Yazilan, Kullanici, Bilgisayar)
     OUTPUT INSERTED.Id AS id
     VALUES
-      (@tarih, @konu, @firma, @donem, @cariInd, @cariAd, @belgeNo, @tutar, @aciklama, @fisNo, @yazilan, @kullanici, @bilgisayar)
+      (@tarih, @konu, @firma, @donem, @cariInd, @cariAd, @belgeNo, @tutar, @aciklama${fisDegeri}, @yazilan, @kullanici, @bilgisayar)
   `;
   const r = t ? await t.sorgu(sorguMetni, alanlar) : await sorgu(sorguMetni, alanlar);
   return Number(r[0].id);
@@ -618,7 +673,7 @@ async function sonIslemleriGetir(secenek) {
                   WHEN 'KasaIade' THEN N'Kasa İadesi'
                   WHEN 'alisFaturasi' THEN N'Alış Faturası'
                   ELSE ISNULL(I.Konu, '') END + ' ' +
-      CONVERT(NVARCHAR(10), I.Tarih, 104) + ' ' + ISNULL(I.FisNo, '') + ' ' +
+      CONVERT(NVARCHAR(10), I.Tarih, 104) + ' ' + ${islemEkKolonlari ? "ISNULL(I.FisNo, '')" : "''"} + ' ' +
       ISNULL((SELECT TOP 1 X.FisNo FROM [${db}].dbo.BD_BelgeSatir X
               WHERE X.IslemId = I.Id AND ISNULL(X.FisNo, '') <> ''), ''))`;
     kosullar.push(...aramaKosulu(metin, parcalar, parametreler, 'ara'));
@@ -637,9 +692,9 @@ async function sonIslemleriGetir(secenek) {
            COALESCE(
              (SELECT TOP 1 S.FisNo FROM [${db}].dbo.BD_BelgeSatir S
               WHERE S.IslemId = I.Id AND ISNULL(S.FisNo, '') <> ''),
-             NULLIF(I.FisNo, '')
+             ${islemEkKolonlari ? "NULLIF(I.FisNo, '')" : 'NULL'}
            ) AS FisNo,
-           I.KayitTarihi,
+           ${islemEkKolonlari ? 'I.KayitTarihi' : 'NULL AS KayitTarihi'},
            I.Tutar, I.Aciklama, I.GeriAlindi, I.Kullanici, I.Bilgisayar
     FROM [${db}].dbo.BD_Islem I
     ${kosullar.length ? 'WHERE ' + kosullar.join(' AND ') : ''}
@@ -874,6 +929,7 @@ async function islemKayitlariniTamSil(t, islemId) {
 
 module.exports = {
   hazirla,
+  islemEkKolonlariVarMi,
   kasaTipleriGetir,
   kasaTipiSorunlari,
   kasaTipiKaydet,

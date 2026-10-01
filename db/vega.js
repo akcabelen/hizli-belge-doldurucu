@@ -115,6 +115,25 @@ function aramaFiltresiKur(alanIfadesi, parcalar, parametreler) {
 
 // --- Cari (müşteri) kartları -----------------------------------------------
 
+// Cari tipi süzgeci (Vega FIRMATIPI bitleri: 1 alıcı, 2 satıcı; 4 bir
+// kurulumda perakende, birinde personel için kullanılmış — bkz. db/cari.js).
+// 'tedarikci' — 01.10.2026 müşteri isteği: Alış Faturası'nda yalnız satıcı
+// tipli cariler gelsin, perakende ve alıcılar gelmesin. Satıcı biti şart;
+// 4 biti taşıyan ve Özel Kod 1'i PERAKENDE olan kartlar dışarıda kalır.
+// Alıcı + Satıcı (3) kartlar tedarikçi sayılır.
+async function cariTipFiltresi(tip, takma, cariTablosu) {
+  const t = `ISNULL(${takma}.FIRMATIPI, 0)`;
+  if (tip === 'alici') return `AND (${t} & 1) = 1`;
+  if (tip === 'satici') return `AND (${t} & 2) = 2`;
+  if (tip !== 'tedarikci') return '';
+  let filtre = `AND (${t} & 2) = 2 AND (${t} & 4) = 0`;
+  if (await kolonVarMi(cariTablosu, 'KOD1')) {
+    filtre += ` AND LTRIM(RTRIM(ISNULL(${takma}.KOD1, ''))) COLLATE Latin1_General_CI_AI
+                  <> 'PERAKENDE' COLLATE Latin1_General_CI_AI`;
+  }
+  return filtre;
+}
+
 async function carileriGetir(secenek) {
   const { firma, donem } = await dogrula(secenek && secenek.firma, secenek && secenek.donem);
   const v = vt();
@@ -127,7 +146,7 @@ async function carileriGetir(secenek) {
   const parametreler = {};
   const tipFiltresi = await musteriTipiFiltresi(
     cariTablosu, secenek && secenek.musteriTipi, 'C', parametreler
-  );
+  ) + ' ' + await cariTipFiltresi(secenek && secenek.tip, 'C', cariTablosu);
   const aramaFiltresi = aramaFiltresiKur(
     `(ISNULL(C.FIRMAADI, '') + ' ' + ISNULL(C.UNVAN, '') + ' ' + ISNULL(C.FIRMAKODU, ''))`,
     aramaParcalari(arama),
@@ -638,6 +657,7 @@ module.exports = {
   izahatAdi,
   aciklamaBaglari,
   kolonVarMi,
+  cariTipFiltresi,
   musteriTipiFiltresi,
   ozelKod1Degerleri,
   satisSerisiTespitEt

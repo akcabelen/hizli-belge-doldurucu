@@ -136,6 +136,8 @@ kesilmiş gerçek alış faturasından sütun sütun alındı: `TBLALFATBASLIK` 
 `TBLCARIHAREKETLERI` (`ALACAK`, `OZELKOD` boş), `TBLCARIGENELHAREKET` (`BELGELINK` NULL).
 Numara programın kendi serisinden (`H…`). Stok kartının alış fiyatı güncellenir (daha eski
 tarihli fatura kartı ezmez); **✎** ile düzeltme ve **Geri Al** kartı eski fiyatına döndürür.
+Tedarikçi kutusunda ve listesinde yalnız cari tipi **Satıcı** (ya da Alıcı + Satıcı) olan
+kartlar gelir; alıcılar, Özel Kod 1'i PERAKENDE olanlar ve FIRMATIPI 4 bitli kartlar gelmez.
 
 ### 🧺 Kasa
 
@@ -175,7 +177,9 @@ Bir müşteriye tıklamak onu Ekstre'de aynı haftayla açar.
   açıklama, **K.Adet** (verilen kasa +, geri gelen −), borç, alacak, bakiye; altta verilen /
   geri gelen / müşteride açık kasa özeti.
 - **Toplu yazdırma** — her müşteri yeni sayfada; sonda boş sayfa çıkmaz.
-- Müşteri değişince aralık bu haftaya döner, açık ayrıntılı rapor yeni müşteri için yenilenir.
+- Müşteri seçilince ayrıntılı rapor **kendiliğinden açılır**; aralık bu haftaya döner,
+  hafta okları raporu da yeniler. Başka sekmeye geçince seçili müşteri bırakılır
+  (yalnız Kasa sekmesi seçimini korur).
 - **Pazardan pazara gezinme**, **Haftalık Giriş/Çıkış tablosu** ve anında çalışan
   **süzgeçler** (tür, yön, açıklama/evrak no, en az tutar).
 

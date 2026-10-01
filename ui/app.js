@@ -202,6 +202,7 @@ function sekmeMusterisiniBirak(ad) {
     belgeCari.temizle();
   } else if (ad === 'ekstre') {
     ekstreCari.temizle();
+    ekstreRaporSirasi++;   // yoldaki döküm gizlenen rapora yazılmasın
     el('ekstreRapor').classList.add('gizli');
     ekstreYukle();
   } else if (ad === 'alis' && !alisDuzenleme) {
@@ -225,6 +226,11 @@ function sekmeAc(ad) {
     s.classList.toggle('etkin', s.id === 'sayfa-' + ad);
   });
   if (ad === 'kasa') kasaBakiyesiniYukle();
+  // Açılışta kasa tipleri okunamadıysa (ör. güncelleme sonrası bakım aynı anda
+  // çalışırken) seçim kutuları boş kalmasın: kasa kullanan ekrana gelince tekrar dene.
+  if ((ad === 'kasa' || ad === 'belge') && firmaSecildiMi() && !durum.kasaKartlari.length) {
+    kasaKartlariniYukle();
+  }
   if (ad === 'belgeler') belgelerYukle();
   if (ad === 'ayar') ayarSayfasiniDoldur();
   if (ad === 'rapor') raporSayfasiAcildi();
@@ -308,12 +314,16 @@ function cariKutusuKur(aramaId, sonucId, seciliId, secildiginde, ekParametre) {
         // Toptan/perakende süzgeci açıkken hiç kart çıkmıyorsa sebebi
         // çoğunlukla kartlarda Özel Kod 1'in boş olmasıdır — kullanıcı
         // "müşteri kayboldu" sanmasın.
-        const ek = ekParametre && ekParametre().musteriTipi;
+        const ekler = ekParametre ? ekParametre() : {};
+        const ek = ekler.musteriTipi;
         sonuc.innerHTML = '<div class="bos"></div>';
-        sonuc.firstChild.textContent = ek
-          ? `Eşleşen müşteri yok. Cari kartlarında Özel Kod 1 = ${ek} yazmıyorsa ` +
-            'yukarıdan "Hepsi" seçin.'
-          : 'Eşleşen müşteri yok.';
+        sonuc.firstChild.textContent = ekler.tip === 'tedarikci'
+          ? 'Eşleşen satıcı yok. Yalnız cari tipi Satıcı (ya da Alıcı + Satıcı) olan kartlar ' +
+            'listelenir; tedarikçinin kartında tipi Satıcı yapın ya da "+ Yeni Cari Kartı" ile açın.'
+          : ek
+            ? `Eşleşen müşteri yok. Cari kartlarında Özel Kod 1 = ${ek} yazmıyorsa ` +
+              'yukarıdan "Hepsi" seçin.'
+            : 'Eşleşen müşteri yok.';
       } else {
         for (const c of liste) {
           const d = document.createElement('button');
@@ -363,13 +373,17 @@ function cariKutusuKur(aramaId, sonucId, seciliId, secildiginde, ekParametre) {
       if (secildiginde) secildiginde(cari, secenek);
     },
     yenile: async () => {
-      if (!seciliCari) return;
+      const istenen = seciliCari;
+      if (!istenen) return;
       try {
         const b = await cagir('vega:bakiye', {
           firma: firmaKodu(),
           donem: donemKodu(),
-          cariInd: seciliCari.cariInd
+          cariInd: istenen.cariInd
         });
+        // Bakiye gelene kadar sekme değişip seçim bırakıldıysa (ya da başka
+        // müşteri seçildiyse) eski müşteri kutuya geri yazılmasın.
+        if (!seciliCari || Number(seciliCari.cariInd) !== Number(istenen.cariInd)) return;
         secimiGoster(Object.assign({}, seciliCari, { bakiye: b }));
       } catch (e) { /* bakiye tazelenemezse eskisi kalsın */ }
     }
@@ -394,7 +408,10 @@ const ekstreCari = cariKutusuKur('ekstreCariArama', 'ekstreCariSonuc', 'ekstreCa
   (c, secenek) => ekstreCariDegisti(c, secenek));
 const odemeCari = cariKutusuKur('odemeCariArama', 'odemeCariSonuc', 'odemeCariSecili',
   () => odemeGecmisiGetir());
-const alisCari = cariKutusuKur('alisCariArama', 'alisCariSonuc', 'alisCariSecili', null);
+// 01.10.2026 müşteri isteği: tedarikçi kutusunda yalnız satıcı tipli cariler;
+// perakende ve alıcılar gelmesin (bkz. db/vega.js → cariTipFiltresi).
+const alisCari = cariKutusuKur('alisCariArama', 'alisCariSonuc', 'alisCariSecili', null,
+  () => ({ tip: 'tedarikci' }));
 
 // ═══════════════════════ BELGE GİR ═══════════════════════
 
@@ -1804,7 +1821,10 @@ for (const id of ['ekstreIslem', 'ekstreYon', 'ekstreMetin', 'ekstreEnAz']) {
 // yeniden hazırlanır. Haftalık Rapor'dan geçişte o hafta korunur (haftaKoru).
 function ekstreCariDegisti(cari, secenek) {
   if (!cari) {
+    // "Değiştir"e basılınca eski müşterinin hareketleri de ekranda kalmasın.
+    ekstreRaporSirasi++;
     el('ekstreRapor').classList.add('gizli');
+    ekstreYukle();
     return;
   }
   if (!(secenek && secenek.haftaKoru)) {
@@ -1814,9 +1834,9 @@ function ekstreCariDegisti(cari, secenek) {
     el('ekstreHaftaEtiket').textContent = haftaEtiketi(bugunTarih);
   }
   ekstreYukle();
-  if (!el('ekstreRapor').classList.contains('gizli') || (secenek && secenek.raporAc)) {
-    ekstreRaporGetir();
-  }
+  // 01.10.2026 müşteri isteği: müşteri seçilince ayrıntılı ekstre de hemen
+  // gelsin, "Ayrıntılı Rapor"a ayrıca basmak gerekmesin.
+  ekstreRaporGetir();
 }
 
 function ekstreHaftayaGit(tarih) {
@@ -1824,6 +1844,8 @@ function ekstreHaftayaGit(tarih) {
   el('ekstreBitis').value = tarihKutusu(haftaSonu(tarih));
   el('ekstreHaftaEtiket').textContent = haftaEtiketi(tarih);
   ekstreYukle();
+  // Ayrıntılı ekstre artık seçimle açık geliyor; hafta değişince o da izlesin.
+  if (ekstreCari.secili() && !el('ekstreRapor').classList.contains('gizli')) ekstreRaporGetir();
 }
 
 function ekstreHaftaKaydir(gun) {
@@ -2290,6 +2312,8 @@ el('ekstreRaporKapat').addEventListener('click', () => {
   el('ekstreRapor').classList.add('gizli');
 });
 
+let ekstreRaporSirasi = 0;
+
 async function ekstreRaporGetir() {
   if (!firmaSecildiMi()) {
     bildir('Önce Ayarlar ekranından firma ve dönem seçin.', 'hata');
@@ -2311,6 +2335,9 @@ async function ekstreRaporGetir() {
   el('ekstreRaporAlt').textContent = '';
   boslukTemizle(el('ekstreRaporGovde'), 9, 'Hazırlanıyor…');
 
+  // Müşteri seçimiyle rapor kendiliğinden açıldığı için arka arkaya seçimde
+  // geç dönen eski müşterinin dökümü yenisinin üstüne yazılmasın.
+  const sira = ++ekstreRaporSirasi;
   try {
     const d = await cagir('rapor:haftalikDetay', {
       firma: firmaKodu(),
@@ -2319,8 +2346,10 @@ async function ekstreRaporGetir() {
       baslangic: el('ekstreBaslangic').value,
       bitis: el('ekstreBitis').value
     });
+    if (sira !== ekstreRaporSirasi) return;
     ekstreRaporCiz(d);
   } catch (e) {
+    if (sira !== ekstreRaporSirasi) return;
     boslukTemizle(el('ekstreRaporGovde'), 9, 'Döküm okunamadı: ' + e.message);
   }
 }
@@ -2882,8 +2911,9 @@ async function cariListesiniAc(hedef) {
     return sekmeAc('ayar');
   }
   cariHedefi = hedef || 'belge';
-  // Tedarikçi aranırken alıcı süzgeci kartı gizlemesin.
-  if (cariHedefi === 'alis') el('cariListeTip').value = '';
+  // Alış faturasında yalnız tedarikçiler (satıcı, perakende hariç).
+  if (cariHedefi === 'alis') el('cariListeTip').value = 'tedarikci';
+  else if (el('cariListeTip').value === 'tedarikci') el('cariListeTip').value = 'alici';
   el('cariListePerde').classList.remove('gizli');
   el('cariListeArama').value = '';
   el('cariListeArama').focus();

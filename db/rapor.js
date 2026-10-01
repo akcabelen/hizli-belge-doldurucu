@@ -634,6 +634,7 @@ async function odemeGecmisi(secenek) {
   const hareketTablosu = tablo(v, firma, donem, 'TBLCARIHAREKETLERI');
   const cariInd = Number(secenek && secenek.cariInd) || null;
   const islemTarihiVar = await kolonVarMi(hareketTablosu, 'ISLEMTARIHI');
+  const ekKolon = yardimci.islemEkKolonlariVarMi();
 
   const parametreler = { firma };
   const kosullar = [];
@@ -678,7 +679,7 @@ async function odemeGecmisi(secenek) {
       ISNULL(H.EVRAKNO, '') AS belgeNo,
       ISNULL(H.ALACAK, 0) AS alacak,
       P.Id AS islemId, P.Konu AS islemKonu, P.KayitTarihi AS kayitTarihi,
-      COALESCE(NULLIF(P.FisNo, ''),
+      COALESCE(${ekKolon ? "NULLIF(P.FisNo, '')" : 'NULL'},
         (SELECT TOP 1 S.FisNo FROM [${v}].dbo.BD_BelgeSatir S
          WHERE S.IslemId = P.Id AND ISNULL(S.FisNo, '') <> '')) AS fisNo,
       ${girisVar ? 'B.baslikAciklama' : "''"} AS baslikAciklama,
@@ -688,7 +689,8 @@ async function odemeGecmisi(secenek) {
     FROM ${hareketTablosu} H
     LEFT JOIN ${kart(v, firma, 'TBLCARI')} C ON C.IND = H.FIRMANO
     OUTER APPLY (
-      SELECT TOP 1 I.Id, I.Konu, I.FisNo, I.KayitTarihi
+      SELECT TOP 1 I.Id, I.Konu,
+             ${ekKolon ? 'I.FisNo, I.KayitTarihi' : 'NULL AS FisNo, NULL AS KayitTarihi'}
       FROM [${v}].dbo.BD_Islem I
       WHERE I.Firma = @firma AND I.CariInd = H.FIRMANO AND I.GeriAlindi = 0
         AND ISNULL(H.EVRAKNO, '') <> ''

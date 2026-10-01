@@ -58,7 +58,7 @@ DECLARE @donem SYSNAME = N'D0001';
 /* sart: veriyle kopyalanan tablolarda WHERE kosulu. Cari kartlarinda gerek
    var: program yalnizca IND >= 100 ve STATUS <> 2 olan kartlari listeliyor,
    rastgele ilk 5 satir kopyalaninca sinamaya tek bir pasif kart dusuyordu. */
-DECLARE @kart TABLE (ad SYSNAME, veriIle BIT, sinir INT, sart NVARCHAR(200));
+DECLARE @kart TABLE (sira INT IDENTITY(1,1), ad SYSNAME, veriIle BIT, sinir INT, sart NVARCHAR(400));
 DECLARE @sql NVARCHAR(MAX);
 DECLARE @tam SYSNAME;
 DECLARE @kaynak SYSNAME;
@@ -77,7 +77,12 @@ INSERT INTO @kart (ad, veriIle, sinir, sart) VALUES
 INSERT INTO @kart (ad, veriIle, sinir, sart) VALUES
   (@firma + N'TBLCARI',       1, 5, N'IND >= 100 AND ISNULL(STATUS, 1) <> 2'),
   (@firma + N'TBLSTOKLAR',    1, 5, NULL),
-  (@firma + N'TBLBIRIMLEREX', 1, 50, NULL);
+  /* 01.10.2026: birimler yalniz kopyalanan stok kartlarina ait olanlar.
+     Eskiden rastgele 50 satir geliyordu; sinamanin actigi yeni kasa kartinin
+     IND'i kopyadaki baska bir kartin birimiyle cakisip "birden cok varsayilan
+     birim" hatasi veriyordu. */
+  (@firma + N'TBLBIRIMLEREX', 1, NULL,
+     N'STOKNO IN (SELECT IND FROM [VEGA_TEST].dbo.' + QUOTENAME(@firma + N'TBLSTOKLAR') + N')');
 
 /* Hareket tablolari (F{firma}D{donem}...) — BOS. */
 INSERT INTO @kart (ad, veriIle, sinir, sart) VALUES
@@ -93,13 +98,16 @@ INSERT INTO @kart (ad, veriIle, sinir, sart) VALUES
   (@firma + @donem + N'TBLCARIGENELHAREKET', 0, NULL, NULL),
   (@firma + @donem + N'TBLSTKGIRBASLIK',     0, NULL, NULL),
   (@firma + @donem + N'TBLSTKGIRHAREKET',    0, NULL, NULL),
+  /* Alis faturasi (30.09.2026). */
+  (@firma + @donem + N'TBLALFATBASLIK',      0, NULL, NULL),
+  (@firma + @donem + N'TBLALFATHAREKET',     0, NULL, NULL),
   /* Nakit tahsilat Vega'nin kasa defterine de dusuyor (05.09.2026). */
   (@firma + @donem + N'TBLKASA',             0, NULL, NULL);
 
-DECLARE @sart NVARCHAR(200);
+DECLARE @sart NVARCHAR(400);
 
 DECLARE gezgin CURSOR LOCAL FAST_FORWARD FOR
-  SELECT ad, veriIle, sinir, sart FROM @kart;
+  SELECT ad, veriIle, sinir, sart FROM @kart ORDER BY sira;
 
 OPEN gezgin;
 FETCH NEXT FROM gezgin INTO @ad, @veriIle, @sinir, @sart;
@@ -141,6 +149,25 @@ GO
 /* Kasa tipleri (PK, SBÜYÜK...) Vega'da hiç yok — eski Access programının
    kendi kodlarıydı. Bu yüzden burada sentetik bir stok kartı eklemeye gerek
    kalmadı: test-yazma.js kasa tipini doğrudan BD_KasaTipi'de oluşturuyor. */
+GO
+
+/* 01.10.2026: stok kartı ve birim sayaçları ayrıştırılır. Kopyada yalnız 5
+   kart ve birimleri var; ikisinin sayacı da "en büyük + 1"den devam edince
+   sınamanın açtığı kasa kartıyla birimi aynı numarayı alabiliyordu ve
+   test-yazma.js'in "kasa tipi, Vega kartı ve birimi farklı" denetimi
+   (Id/STOKNO karışıklığını yakalamak için) tesadüfen düşüyordu. */
+DECLARE @f SYSNAME = N'F0102';
+DECLARE @stok NVARCHAR(300) = N'VEGA_TEST.dbo.' + @f + N'TBLSTOKLAR';
+DECLARE @birim NVARCHAR(300) = N'VEGA_TEST.dbo.' + @f + N'TBLBIRIMLEREX';
+DECLARE @x NVARCHAR(MAX) = N'
+  DECLARE @m INT = (SELECT MAX(n) FROM (
+    SELECT ISNULL(MAX(IND), 0) AS n FROM ' + @stok + N'
+    UNION ALL SELECT ISNULL(MAX(IND), 0) FROM ' + @birim + N') X);
+  DECLARE @s1 INT = @m + 100000, @s2 INT = @m + 200000;
+  DBCC CHECKIDENT (''' + @stok + N''', RESEED, @s1) WITH NO_INFOMSGS;
+  DBCC CHECKIDENT (''' + @birim + N''', RESEED, @s2) WITH NO_INFOMSGS;';
+IF OBJECT_ID(@stok, 'U') IS NOT NULL AND OBJECT_ID(@birim, 'U') IS NOT NULL
+  EXEC sp_executesql @x;
 GO
 
 /* IDENTITY korundu mu? Program belge numarasini IDENTITY'den aliyor. */

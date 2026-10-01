@@ -53,7 +53,7 @@
 const { sorgu, islem } = require('./sql');
 const { ayarOku } = require('./ayar');
 const { dogrula, kart, tablo } = require('./firma');
-const { kolonVarMi, musteriTipiFiltresi, ozelKod1Degerleri } = require('./vega');
+const { kolonVarMi, musteriTipiFiltresi, ozelKod1Degerleri, cariTipFiltresi } = require('./vega');
 const yazma = require('./yazma');
 
 function vt() {
@@ -300,9 +300,8 @@ async function carileriListele(secenek) {
   const hareketTablosu = tablo(v, firma, donem, 'TBLCARIHAREKETLERI');
   const limit = Math.min(Number((secenek && secenek.limit) || 1000), 5000);
 
-  let tipFiltresi = '';
-  if (secenek && secenek.tip === 'alici') tipFiltresi = 'AND (ISNULL(C.FIRMATIPI, 0) & 1) = 1';
-  if (secenek && secenek.tip === 'satici') tipFiltresi = 'AND (ISNULL(C.FIRMATIPI, 0) & 2) = 2';
+  // alici / satici / tedarikci (Alış Faturası) — bkz. db/vega.js → cariTipFiltresi.
+  const tipFiltresi = await cariTipFiltresi(secenek && secenek.tip, 'C', cariTablosu);
 
   let bakiyeFiltresi = '';
   if (secenek && secenek.sadeceBakiyeli) bakiyeFiltresi = 'AND ISNULL(B.bakiye, 0) <> 0';
